@@ -218,6 +218,12 @@ let servidor = (() => {
   }
   try{ return localStorage.getItem('espartanos:db') || ''; }catch(e){ return ''; }
 })();
+// acepta la dirección tal y como se ve en la barra del navegador
+function normalizarServidor(u){
+  u = (u || '').trim().replace(/\/+$/, '');
+  const m = u.match(/^https?:\/\/(?:www\.)?jsonblob\.com\/(?!api\/)(.+)$/);
+  return m ? 'https://jsonblob.com/api/jsonBlob/' + m[1] : u;
+}
 const urlLiga = () => /firebaseio|firebasedatabase/.test(servidor)
   ? servidor.replace(/\/+$/, '') + '/liga.json'
   : servidor.replace(/\/+$/, '');
@@ -609,7 +615,7 @@ function vGrupo(){
         y sin registrarte, y te doy el enlace para el WhatsApp.</p>
       <button class="btn" id="crearServidor">Crear el servidor del grupo</button>
       <p class="nota">Si ya tienes una base de datos propia, pega aquí su dirección.</p>
-      <input class="campo" type="text" id="servidor" placeholder="https://...">
+      <input class="campo" type="text" id="servidor" placeholder="https://jsonblob.com/1234...">
       <button class="btn hueco" id="ponerServidor">Usar esa dirección</button>`}
 
     <div class="titulillo">Copia de seguridad</div>
@@ -788,7 +794,7 @@ document.addEventListener('click', async e => {
   }
 
   if(t.id === 'ponerServidor'){
-    servidor = ($('#servidor').value || '').trim().replace(/\/+$/, '');
+    servidor = normalizarServidor($('#servidor').value);
     try{ servidor ? localStorage.setItem('espartanos:db', servidor)
                   : localStorage.removeItem('espartanos:db'); }catch(e){}
     if(servidor) await guardar();

@@ -127,7 +127,7 @@
     <button role="tab" data-tab="semana" aria-selected="true">Nuevo partido</button>
     <button role="tab" data-tab="clasi" aria-selected="false">Clasificación</button>
     <button role="tab" data-tab="hist" aria-selected="false">Historial</button>
-    <button role="tab" data-tab="grupo" aria-selected="false">Grupo</button>
+    <button role="tab" data-tab="grupo" aria-selected="false">Admin Grupo</button>
   </nav>
 
   <div id="aviso"></div>
@@ -310,9 +310,9 @@ async function leerNube(){
     return r && r.value ? JSON.parse(r.value) : null;
   }catch(e){ return null; }
 }
-function leerAqui(almacen){
+function leerAqui(almacen, clave = K){
   try{
-    const v = window[almacen].getItem(K);
+    const v = window[almacen].getItem(clave);
     return v ? JSON.parse(v) : null;
   }catch(e){ return null; }
 }
@@ -334,21 +334,39 @@ function diagnostico(){
 let informe = {servidor:null, nube:null, local:null, sesion:null};
 
 // lee las tres copias y se queda con la más reciente
+let pendiente = false;                // hay cambios sin subir al servidor
+const CLAVE_PENDIENTE = K + ':pendiente';
+
 async function cargar(){
-  const fuentes = {servidor: await leerServidor(),
-                   nube: await leerNube(),
-                   local: leerAqui('localStorage'),
-                   sesion: leerAqui('sessionStorage')};
-  let mejor = null;
-  for(const clave of ['servidor','nube','local','sesion']){
-    const v = fuentes[clave];
-    informe[clave] = v ? (v.jornadas || []).length : null;
-    if(v && (!mejor || (v.actualizado || 0) > (mejor.actualizado || 0))) mejor = v;
+  if(servidor){
+    const remoto = await leerServidor();
+    if(remoto){
+      S = remoto;
+      modo = 'servidor';
+      informe.servidor = (remoto.jornadas || []).length;
+      const enEspera = leerAqui('localStorage', CLAVE_PENDIENTE);
+      if(enEspera){ fusionar(enEspera); await guardar(); }   // lo apuntado sin cobertura
+    }else{
+      const enEspera = leerAqui('localStorage', CLAVE_PENDIENTE);
+      if(enEspera) S = enEspera;
+      pendiente = !!enEspera;
+      modo = 'sin-conexion';
+    }
+  }else{
+    const fuentes = {nube: await leerNube(),
+                     local: leerAqui('localStorage'),
+                     sesion: leerAqui('sessionStorage')};
+    let mejor = null;
+    for(const clave of ['nube','local','sesion']){
+      const v = fuentes[clave];
+      informe[clave] = v ? (v.jornadas || []).length : null;
+      if(v && (!mejor || (v.actualizado || 0) > (mejor.actualizado || 0))) mejor = v;
+    }
+    if(mejor) S = mejor;
+    modo = hayNube() ? 'nube'
+         : pruebaAlmacen(window.localStorage) ? 'local'
+         : pruebaAlmacen(window.sessionStorage) ? 'sesion' : 'memoria';
   }
-  if(mejor) S = mejor;
-  modo = hayNube() ? 'nube'
-       : pruebaAlmacen(window.localStorage) ? 'local'
-       : pruebaAlmacen(window.sessionStorage) ? 'sesion' : 'memoria';
   if(!S.jugadores) S.jugadores = [];
   if(!S.jornadas) S.jornadas = [];
   if(!S.borrados) S.borrados = [];
@@ -374,22 +392,33 @@ function fusionar(remoto){
 async function guardar(){
   S.jornadas.sort(porFecha);
   S.actualizado = Date.now();
-  let algo = false;
-  if(servidor){
+
+  if(servidor){                       // única fuente de verdad
     const remoto = await leerServidor();
     if(remoto) fusionar(remoto);
     S.actualizado = Date.now();
-    if(await escribirServidor()){ algo = true; modo = 'servidor'; informe.servidor = S.jornadas.length; }
+    if(await escribirServidor()){
+      modo = 'servidor';
+      informe.servidor = S.jornadas.length;
+      pendiente = false;
+      try{ localStorage.removeItem(CLAVE_PENDIENTE); }catch(e){}
+      return true;
+    }
+    pendiente = true;                 // sin conexión: se guarda aparte y se sube luego
+    modo = 'sin-conexion';
+    try{ localStorage.setItem(CLAVE_PENDIENTE, JSON.stringify(S)); }catch(e){}
+    return false;
   }
+
+  let algo = false;
   if(hayNube()){
     try{
       const remoto = await leerNube();
       if(remoto) fusionar(remoto);
     }catch(e){}
-    S.actualizado = Date.now();
     try{
       const r = await window.storage.set(K, JSON.stringify(S), true);
-      if(r){ algo = true; if(modo !== 'servidor') modo = 'nube'; informe.nube = S.jornadas.length; }
+      if(r){ algo = true; modo = 'nube'; informe.nube = S.jornadas.length; }
     }catch(e){}
   }
   const texto = JSON.stringify(S);
@@ -449,7 +478,9 @@ function pintar(){
   $('#marca').textContent = S.nombre || 'Deportistas Espartanos';
   $('#aviso').innerHTML =
     (modo === 'memoria' ? `<div class="banner">Este visor no está dejando guardar nada, así que los cambios se perderán al cerrar.
-       Descarga el archivo y ábrelo desde tu móvil, o copia tus datos en Grupo antes de salir.</div>` : '') +
+       Descarga el archivo y ábrelo desde tu móvil, o copia tus datos antes de salir.</div>` : '') +
+    (pendiente ? `<div class="banner">Sin conexión con el servidor del grupo. Lo apuntado se ha quedado guardado
+       en este móvil y se subirá solo en cuanto vuelvas a tener cobertura.</div>` : '') +
     (mensaje ? `<div class="banner info">${mensaje}</div>` : '');
   $('#escudo').innerHTML = S.icono
     ? `<img class="escudo" src="${S.icono}" alt="Icono del grupo">` : PALA;
@@ -572,9 +603,9 @@ function vGrupo(){
       ? new Date(S.actualizado).toLocaleString('es-ES', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'})
       : 'nunca';
     return `<div class="jornada"><div class="res" style="font-size:14px">
-      Servidor del grupo: <span>${m(d.servidor)}</span> · guarda <span>${c(d.informe.servidor)}</span><br>
-      Almacén de Claude: <span>${m(d.nube)}</span> · guarda <span>${c(d.informe.nube)}</span><br>
-      Este navegador: <span>${m(d.local)}</span> · guarda <span>${c(d.informe.local)}</span><br>
+      Servidor del grupo: <span>${d.servidor ? 'conectado' : 'sin configurar'}</span>${d.servidor ? ` · guarda <span>${c(d.informe.servidor)}</span>` : ''}<br>
+      Guardando ahora en: <span>${({servidor:'el servidor del grupo', 'sin-conexion':'este móvil, pendiente de subir',
+        nube:'el almacén de Claude', local:'este navegador', sesion:'la sesión', memoria:'ningún sitio'})[d.modo] || d.modo}</span><br>
       Último guardado: <span>${cuando}</span>
     </div></div>`; })();
 

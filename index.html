@@ -225,7 +225,8 @@ const urlLiga = () => /firebaseio|firebasedatabase/.test(servidor)
 // crea un almacén común sin registrarse; se prueban dos servicios por si uno falla
 async function crearJsonblob(){
   const r = await fetch('https://jsonblob.com/api/jsonBlob', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(S)});
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(S)})
+    .catch(e => { throw new Error('jsonblob no responde (' + (e.message || 'red bloqueada') + ')'); });
   if(!r.ok) throw new Error('jsonblob responde ' + r.status);
   const id = r.headers.get('x-jsonblob');
   const sitio = r.headers.get('location');
@@ -234,7 +235,8 @@ async function crearJsonblob(){
   throw new Error('jsonblob no deja leer la dirección');
 }
 async function crearKvdb(){
-  const r = await fetch('https://kvdb.io/', {method:'POST', body:''});
+  const r = await fetch('https://kvdb.io/', {method:'POST', body:''})
+    .catch(e => { throw new Error('kvdb no responde (' + (e.message || 'red bloqueada') + ')'); });
   if(!r.ok) throw new Error('kvdb responde ' + r.status);
   const cubo = (await r.text()).trim();
   if(!cubo || /\s/.test(cubo)) throw new Error('kvdb no ha devuelto una dirección');
@@ -571,6 +573,7 @@ function vGrupo(){
     <div class="titulillo">Nombre e icono</div>
     <input class="campo" type="text" id="nombreGrupo" maxlength="34"
            value="${esc(S.nombre || 'Deportistas Espartanos')}" placeholder="Nombre del grupo">
+    <button class="btn hueco" id="guardarNombre">Guardar el nombre</button>
     <div class="icono-fila">
       ${S.icono ? `<img src="${S.icono}" alt="Icono actual del grupo">`
                 : `<div style="width:52px;height:52px;flex:none;display:grid;place-items:center">${PALA}</div>`}
@@ -743,6 +746,12 @@ document.addEventListener('click', async e => {
     pintar(); return;
   }
 
+  if(t.id === 'guardarNombre'){
+    S.nombre = ($('#nombreGrupo').value || '').trim() || 'Deportistas Espartanos';
+    mensaje = 'Nombre guardado.';
+    await guardar(); pintar(); return;
+  }
+
   if(t.id === 'crearServidor'){
     mensaje = 'Creando el servidor…'; pintar();
     try{
@@ -845,13 +854,8 @@ document.addEventListener('change', async e => {
     return;
   }
   if(e.target.id === 'fechaPartido'){ fechaPartido = e.target.value || hoy(); return; }
-  if(['nombreGrupo','foto'].includes(e.target.id) && !soyAdmin){
+  if(e.target.id === 'foto' && !soyAdmin){
     mensaje = 'Eso solo lo puede cambiar el administrador del grupo.'; pintar(); return;
-  }
-  if(e.target.id === 'nombreGrupo'){
-    const n = e.target.value.trim();
-    S.nombre = n || 'Deportistas Espartanos';
-    await guardar(); pintar(); return;
   }
   if(e.target.id !== 'foto') return;
   const file = e.target.files && e.target.files[0];
@@ -889,5 +893,15 @@ document.addEventListener('paste', async e => {
   }
 });
 
-cargar().then(pintar);
+function avisarFallo(txt){
+  mensaje = 'Fallo interno: ' + txt;
+  try{ pintar(); }catch(e){
+    const caja = document.getElementById('aviso');
+    if(caja) caja.innerHTML = '<div class="banner">' + mensaje + '</div>';
+  }
+}
+window.addEventListener('error', e => avisarFallo(e.message));
+window.addEventListener('unhandledrejection', e => avisarFallo((e.reason && e.reason.message) || e.reason));
+
+cargar().then(pintar).catch(e => avisarFallo('al cargar: ' + e.message));
 </script>

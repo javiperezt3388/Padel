@@ -147,7 +147,9 @@ let fechaPartido = hoy();
 let ultima = null;      // resumen del último partido guardado
 let confirmando = null; // los diálogos del navegador no funcionan en el visor: confirmamos aquí
 let mensaje = '';
-let soyAdmin = false;
+let soyAdmin = false;          // este navegador conoce la clave
+// el mando solo se ejerce entrando por el enlace de administrador
+const mando = () => soyAdmin && pideAdmin;
    // control sencillo entre vecinos, no es una cerradura de verdad
 const pideAdmin = /(^|[#&])admin(=|$|&)/.test(location.hash + location.search);
 
@@ -471,7 +473,7 @@ function turno(){ // a quién le toca: más semanas sin jugar primero
 
 /* ---------- pintar ---------- */
 function pintar(){
-  const puedeGrupo = soyAdmin || pideAdmin;
+  const puedeGrupo = pideAdmin;
   const botonGrupo = document.querySelector('nav button[data-tab="grupo"]');
   if(botonGrupo) botonGrupo.style.display = puedeGrupo ? '' : 'none';
   if(tab === 'grupo' && !puedeGrupo) tab = 'semana';
@@ -576,7 +578,7 @@ function vHist(){
     const puntos = j.jugadores.map(id => `${esc((S.jugadores.find(q=>q.id===id)||{nombre:'?'}).nombre)} <span>${p[id].puntos}</span>`).join(' · ');
     const f = new Date(j.fecha + 'T12:00:00').toLocaleDateString('es-ES',{day:'numeric',month:'long'});
     return `<div class="jornada">
-      <div class="fecha"><span>${f}</span>${!soyAdmin ? '' : confirmando === 'partido:'+j.id
+      <div class="fecha"><span>${f}</span>${!mando() ? '' : confirmando === 'partido:'+j.id
         ? `¿Seguro? <button class="borrar" data-si="partido:${j.id}">Sí, borrar</button> ·
            <button class="borrar" data-no="1">No</button>`
         : `<button class="borrar" data-pedir="partido:${j.id}">Borrar</button>`}</div>
@@ -590,7 +592,7 @@ function vHist(){
 function vGrupo(){
   const lista = S.jugadores.map(p => `<div class="fila">
       <span class="nom">${esc(p.nombre)}</span>
-      ${!soyAdmin ? '' : confirmando === 'jugador:'+p.id
+      ${!mando() ? '' : confirmando === 'jugador:'+p.id
           ? `¿Seguro? <button class="borrar" data-si="jugador:${p.id}">Sí</button> ·
              <button class="borrar" data-no="1">No</button>`
           : `<button class="borrar" data-pedir="jugador:${p.id}">Quitar</button>`}
@@ -609,7 +611,7 @@ function vGrupo(){
       Último guardado: <span>${cuando}</span>
     </div></div>`; })();
 
-  if(!soyAdmin){
+  if(!mando()){
     return `<h2>Quién está en la liga</h2>
       <p class="nota">${S.jugadores.length} jugadores. Cualquiera puede apuntar partidos; para cambiar el grupo hace falta el código del administrador.</p>
       ${lista}
@@ -733,7 +735,7 @@ document.addEventListener('click', async e => {
 
   const soloAdmin = ['añadir','restaurar','quitaFoto'].includes(t.id) ||
                     (t.dataset.pedir || t.dataset.si || '').match(/^(jugador|partido|reset)/);
-  if(soloAdmin && !soyAdmin){
+  if(soloAdmin && !mando()){
     mensaje = 'Eso solo lo puede cambiar el administrador del grupo.';
     pintar(); return;
   }
@@ -909,7 +911,7 @@ document.addEventListener('change', async e => {
     return;
   }
   if(e.target.id === 'fechaPartido'){ fechaPartido = e.target.value || hoy(); return; }
-  if(e.target.id === 'foto' && !soyAdmin){
+  if(e.target.id === 'foto' && !mando()){
     mensaje = 'Eso solo lo puede cambiar el administrador del grupo.'; pintar(); return;
   }
   if(e.target.id !== 'foto') return;

@@ -147,7 +147,22 @@ let fechaPartido = hoy();
 let ultima = null;      // resumen del último partido guardado
 let confirmando = null; // los diálogos del navegador no funcionan en el visor: confirmamos aquí
 let mensaje = '';
-let soyAdmin = false;   // control sencillo entre vecinos, no es una cerradura de verdad
+let soyAdmin = false;
+   // control sencillo entre vecinos, no es una cerradura de verdad
+const pideAdmin = /(^|[#&])admin(=|$|&)/.test(location.hash + location.search);
+
+// la clave no se guarda nunca en claro
+async function cifrar(texto){
+  const semilla = 'espartanos::' + texto;
+  try{
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(semilla));
+    return [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2,'0')).join('');
+  }catch(e){
+    let h = 5381;
+    for(let i = 0; i < semilla.length; i++) h = ((h << 5) + h + semilla.charCodeAt(i)) >>> 0;
+    return 'x' + h.toString(16);
+  }
+}
 const $ = s => document.querySelector(s);
 const uid = () => Math.random().toString(36).slice(2,9);
 const esc = t => String(t).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
@@ -207,25 +222,49 @@ const urlLiga = () => /firebaseio|firebasedatabase/.test(servidor)
   ? servidor.replace(/\/+$/, '') + '/liga.json'
   : servidor.replace(/\/+$/, '');
 
-// crea un almacén común sin registrarse: jsonblob.com da una dirección y ya está
-async function crearServidor(){
+// crea un almacén común sin registrarse; se prueban dos servicios por si uno falla
+async function crearJsonblob(){
   const r = await fetch('https://jsonblob.com/api/jsonBlob', {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(S)});
-  if(!r.ok) throw new Error('el servicio no ha respondido');
+  if(!r.ok) throw new Error('jsonblob responde ' + r.status);
   const id = r.headers.get('x-jsonblob');
   const sitio = r.headers.get('location');
   if(id) return 'https://jsonblob.com/api/jsonBlob/' + id;
   if(sitio) return sitio.startsWith('http') ? sitio : 'https://jsonblob.com' + sitio;
-  throw new Error('no me ha dejado leer la dirección');
+  throw new Error('jsonblob no deja leer la dirección');
+}
+async function crearKvdb(){
+  const r = await fetch('https://kvdb.io/', {method:'POST', body:''});
+  if(!r.ok) throw new Error('kvdb responde ' + r.status);
+  const cubo = (await r.text()).trim();
+  if(!cubo || /\s/.test(cubo)) throw new Error('kvdb no ha devuelto una dirección');
+  return 'https://kvdb.io/' + cubo + '/liga';
+}
+async function crearServidor(){
+  const fallos = [];
+  for(const intento of [crearJsonblob, crearKvdb]){
+    try{
+      const url = await intento();
+      const previo = servidor;
+      servidor = url;
+      if(await escribirServidor() && await leerServidor()) return url;   // comprobado de verdad
+      servidor = previo;
+      fallos.push('no se puede escribir en ' + url.split('/')[2]);
+    }catch(e){ fallos.push(e.message); }
+  }
+  throw new Error(fallos.join('; '));
 }
 const enlaceGrupo = () => location.href.split('#')[0] + '#db=' + servidor;
+const enlaceAdmin = () => enlaceGrupo() + '&admin';
 
 async function leerServidor(){
   if(!servidor) return null;
   try{
     const r = await fetch(urlLiga());
     if(!r.ok) return null;
-    const v = await r.json();
+    const bruto = (await r.text()).trim();
+    if(!bruto || bruto === 'null') return null;
+    const v = JSON.parse(bruto);
     return v && v.jugadores ? v : null;
   }catch(e){ return null; }
 }
@@ -287,9 +326,10 @@ async function cargar(){
   if(!S.jugadores) S.jugadores = [];
   if(!S.jornadas) S.jornadas = [];
   if(!S.borrados) S.borrados = [];
+  const cerrado = !!(S.claveHash || S.clave);
   try{
-    soyAdmin = !S.clave || localStorage.getItem('espartanos:clave') === S.clave;
-  }catch(e){ soyAdmin = !S.clave; }
+    soyAdmin = !cerrado || localStorage.getItem('espartanos:clave') === (S.claveHash || S.clave);
+  }catch(e){ soyAdmin = !cerrado; }
 }
 
 // lo que otro del grupo haya guardado mientras tanto, sin resucitar lo borrado
@@ -376,6 +416,10 @@ function turno(){ // a quién le toca: más semanas sin jugar primero
 
 /* ---------- pintar ---------- */
 function pintar(){
+  const puedeGrupo = soyAdmin || pideAdmin;
+  const botonGrupo = document.querySelector('nav button[data-tab="grupo"]');
+  if(botonGrupo) botonGrupo.style.display = puedeGrupo ? '' : 'none';
+  if(tab === 'grupo' && !puedeGrupo) tab = 'semana';
   $('#marca').textContent = S.nombre || 'Deportistas Espartanos';
   $('#aviso').innerHTML =
     (modo === 'memoria' ? `<div class="banner">Este visor no está dejando guardar nada, así que los cambios se perderán al cerrar.
@@ -540,12 +584,12 @@ function vGrupo(){
     ${S.jugadores.length ? `<div class="titulillo">${S.jugadores.length} jugadores</div>${lista}` : ''}
 
     <div class="titulillo">Administrador</div>
-    <p class="nota">${S.clave
+    <p class="nota">${(S.claveHash || S.clave)
       ? 'Tienes el mando en este móvil. Cualquiera con el enlace puede apuntar partidos y mirar la clasificación, pero solo tú tocas el grupo.'
       : 'Pon un código y serás el único que pueda cambiar jugadores, nombre, icono y borrados. Guárdalo, porque no se recupera.'}</p>
-    <input class="campo" type="password" id="clave" placeholder="${S.clave ? 'Cambiar el código' : 'Elige un código'}">
-    <button class="btn hueco" id="ponerClave">${S.clave ? 'Cambiar el código' : 'Ser administrador'}</button>
-    ${S.clave ? `<button class="btn hueco" id="salirAdmin">Salir del modo administrador</button>` : ''}
+    <input class="campo" type="password" id="clave" placeholder="${(S.claveHash || S.clave) ? 'Cambiar el código' : 'Elige un código'}">
+    <button class="btn hueco" id="ponerClave">${(S.claveHash || S.clave) ? 'Cambiar el código' : 'Ser administrador'}</button>
+    ${(S.claveHash || S.clave) ? `<button class="btn hueco" id="salirAdmin">Salir del modo administrador</button>` : ''}
 
     <div class="titulillo">Servidor del grupo</div>
     ${servidor ? `
@@ -553,6 +597,9 @@ function vGrupo(){
         ve los mismos datos y puede apuntar partidos.</p>
       <textarea class="campo" id="enlace" style="min-height:70px">${esc(enlaceGrupo())}</textarea>
       <button class="btn hueco" id="copiarEnlace">Copiar el enlace del grupo</button>
+      <p class="nota">Y este es el tuyo, el único que abre esta pestaña. Guárdalo en favoritos y no lo repartas.</p>
+      <textarea class="campo" id="enlaceAdmin" style="min-height:70px">${esc(enlaceAdmin())}</textarea>
+      <button class="btn hueco" id="copiarAdmin">Copiar mi enlace de administrador</button>
       <button class="btn hueco" id="quitarServidor">Desconectar</button>`
     : `
       <p class="nota">Sin servidor, cada móvil guarda lo suyo. Con un botón te creo uno gratis
@@ -564,7 +611,7 @@ function vGrupo(){
 
     <div class="titulillo">Copia de seguridad</div>
     <p class="nota">Copia estos datos y guárdalos donde quieras; el botón de restaurar los vuelve a cargar.</p>
-    <textarea class="campo" id="copia">${esc(JSON.stringify({...S, icono:undefined}))}</textarea>
+    <textarea class="campo" id="copia">${esc(JSON.stringify({...S, icono:undefined, clave:undefined, claveHash:undefined}))}</textarea>
     <button class="btn hueco" id="copiar">Copiar datos al portapapeles</button>
     <button class="btn hueco" id="restaurar">Restaurar desde este texto</button>
 
@@ -670,8 +717,11 @@ document.addEventListener('click', async e => {
 
   if(t.id === 'entrarAdmin'){
     const dada = ($('#clave').value || '').trim();
-    if(dada && dada === S.clave){
-      try{ localStorage.setItem('espartanos:clave', dada); }catch(e){}
+    const huella = await cifrar(dada);
+    const vale = S.claveHash ? huella === S.claveHash : (!!S.clave && dada === S.clave);
+    if(vale){
+      if(!S.claveHash){ S.claveHash = huella; delete S.clave; await guardar(); }
+      try{ localStorage.setItem('espartanos:clave', S.claveHash); }catch(e){}
       soyAdmin = true; mensaje = 'Modo administrador activado.';
     } else mensaje = 'Ese código no es el del grupo.';
     pintar(); return;
@@ -680,8 +730,9 @@ document.addEventListener('click', async e => {
   if(t.id === 'ponerClave'){
     const nueva = ($('#clave').value || '').trim();
     if(nueva.length < 4){ mensaje = 'Pon un código de al menos cuatro caracteres.'; pintar(); return; }
-    S.clave = nueva;
-    try{ localStorage.setItem('espartanos:clave', nueva); }catch(e){}
+    S.claveHash = await cifrar(nueva);
+    delete S.clave;
+    try{ localStorage.setItem('espartanos:clave', S.claveHash); }catch(e){}
     soyAdmin = true; mensaje = 'Código guardado. Apúntalo, no se puede recuperar.';
     await guardar(); pintar(); return;
   }
@@ -701,13 +752,14 @@ document.addEventListener('click', async e => {
       mensaje = 'Servidor creado. Copia el enlace y pásalo al grupo.';
     }catch(err){
       servidor = '';
-      mensaje = 'No he podido crearlo (' + err.message + '). Prueba de nuevo o usa una dirección propia.';
+      mensaje = 'No he podido crearlo: ' + err.message + '. Entra en jsonblob.com desde el navegador, ' +
+                'guarda ahí un {} y pega la dirección de la API en el recuadro de abajo.';
     }
     pintar(); return;
   }
 
-  if(t.id === 'copiarEnlace'){
-    const caja = $('#enlace');
+  if(t.id === 'copiarEnlace' || t.id === 'copiarAdmin'){
+    const caja = $(t.id === 'copiarAdmin' ? '#enlaceAdmin' : '#enlace');
     try{
       await navigator.clipboard.writeText(caja.value);
       mensaje = 'Enlace copiado. Pégalo en el grupo de WhatsApp.';
@@ -756,8 +808,9 @@ document.addEventListener('click', async e => {
     try{ datos = JSON.parse($('#copia').value); }
     catch(err){ mensaje = 'Ese texto no es una copia válida.'; pintar(); return; }
     if(!datos || !Array.isArray(datos.jugadores)){ mensaje = 'Ese texto no es una copia válida.'; pintar(); return; }
-    const icono = S.icono;
+    const icono = S.icono, huella = S.claveHash || S.clave;
     S = datos;
+    if(huella && !S.claveHash){ S.claveHash = huella; delete S.clave; }
     if(!S.jornadas) S.jornadas = [];
     if(!S.borrados) S.borrados = [];
     if(icono && !S.icono) S.icono = icono;

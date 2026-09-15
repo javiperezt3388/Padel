@@ -221,18 +221,32 @@ let servidor = (() => {
 // acepta la dirección tal y como se ve en la barra del navegador
 function normalizarServidor(u){
   u = (u || '').trim().replace(/\/+$/, '');
-  const m = u.match(/^https?:\/\/(?:www\.)?jsonblob\.com\/(?!api\/)(.+)$/);
-  return m ? 'https://jsonblob.com/api/jsonBlob/' + m[1] : u;
+  const j = u.match(/^https?:\/\/(?:www\.)?jsonblob\.com\/(?!api\/)(.+)$/);
+  if(j) return 'https://jsonblob.com/api/jsonBlob/' + j[1];
+  const k = u.match(/^https?:\/\/kvdb\.io\/([^\/]+)$/);
+  if(k) return 'https://kvdb.io/' + k[1] + '/liga';
+  return u;
 }
 const urlLiga = () => /firebaseio|firebasedatabase/.test(servidor)
   ? servidor.replace(/\/+$/, '') + '/liga.json'
   : servidor.replace(/\/+$/, '');
 
+// ninguna espera eterna: si un servidor no contesta en 8 segundos, se abandona
+async function pedir(url, opciones = {}, segundos = 8){
+  const corte = new AbortController();
+  const reloj = setTimeout(() => corte.abort(), segundos * 1000);
+  try{
+    return await fetch(url, {...opciones, signal: corte.signal});
+  }catch(e){
+    throw new Error(e.name === 'AbortError' ? 'no contesta' : (e.message || 'red bloqueada'));
+  }finally{ clearTimeout(reloj); }
+}
+
 // crea un almacén común sin registrarse; se prueban dos servicios por si uno falla
 async function crearJsonblob(){
-  const r = await fetch('https://jsonblob.com/api/jsonBlob', {
+  const r = await pedir('https://jsonblob.com/api/jsonBlob', {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(S)})
-    .catch(e => { throw new Error('jsonblob no responde (' + (e.message || 'red bloqueada') + ')'); });
+    .catch(e => { throw new Error('jsonblob: ' + e.message); });
   if(!r.ok) throw new Error('jsonblob responde ' + r.status);
   const id = r.headers.get('x-jsonblob');
   const sitio = r.headers.get('location');
@@ -241,16 +255,20 @@ async function crearJsonblob(){
   throw new Error('jsonblob no deja leer la dirección');
 }
 async function crearKvdb(){
-  const r = await fetch('https://kvdb.io/', {method:'POST', body:''})
-    .catch(e => { throw new Error('kvdb no responde (' + (e.message || 'red bloqueada') + ')'); });
+  let r = await pedir('https://kvdb.io/', {method:'POST', body:''})
+    .catch(e => { throw new Error('kvdb: ' + e.message); });
+  if(!r.ok){        // algunas versiones piden un correo para etiquetar el cubo
+    r = await pedir('https://kvdb.io/', {method:'POST', body:'email=liga@espartanos.local'})
+      .catch(e => { throw new Error('kvdb: ' + e.message); });
+  }
   if(!r.ok) throw new Error('kvdb responde ' + r.status);
   const cubo = (await r.text()).trim();
-  if(!cubo || /\s/.test(cubo)) throw new Error('kvdb no ha devuelto una dirección');
+  if(!cubo || /\s/.test(cubo) || cubo.length > 80) throw new Error('kvdb no ha devuelto una dirección');
   return 'https://kvdb.io/' + cubo + '/liga';
 }
 async function crearServidor(){
   const fallos = [];
-  for(const intento of [crearJsonblob, crearKvdb]){
+  for(const intento of [crearKvdb, crearJsonblob]){
     try{
       const url = await intento();
       const previo = servidor;
@@ -268,7 +286,7 @@ const enlaceAdmin = () => enlaceGrupo() + '&admin';
 async function leerServidor(){
   if(!servidor) return null;
   try{
-    const r = await fetch(urlLiga());
+    const r = await pedir(urlLiga());
     if(!r.ok) return null;
     const bruto = (await r.text()).trim();
     if(!bruto || bruto === 'null') return null;
@@ -279,7 +297,7 @@ async function leerServidor(){
 async function escribirServidor(){
   if(!servidor) return false;
   try{
-    const r = await fetch(urlLiga(), {method:'PUT', headers:{'Content-Type':'application/json'},
+    const r = await pedir(urlLiga(), {method:'PUT', headers:{'Content-Type':'application/json'},
                                       body: JSON.stringify(S)});
     return r.ok;
   }catch(e){ return false; }

@@ -126,6 +126,7 @@
   <nav role="tablist">
     <button role="tab" data-tab="semana" aria-selected="true">Nuevo partido</button>
     <button role="tab" data-tab="clasi" aria-selected="false">Clasificación</button>
+    <button role="tab" data-tab="faltas" aria-selected="false">Warnings</button>
     <button role="tab" data-tab="hist" aria-selected="false">Historial</button>
     <button role="tab" data-tab="grupo" aria-selected="false">Admin Grupo</button>
   </nav>
@@ -139,7 +140,8 @@ const K = 'espartanos:liga';
 let S = {jugadores:[], jornadas:[]};
 let tab = 'semana';
 let sel = [];          // ids elegidos para esta semana
-let sets = [[6,4],[6,4],[6,4]];
+let sets = [[6,4],[6,4]];
+let pareja = 0;              // 0: 1º+2º vs 3º+4º · 1: 1º+3º vs 2º+4º · 2: 1º+4º vs 2º+3º
 let fase = 'convocar';  // convocar | marcador
 const hoy = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
                     return d.toISOString().slice(0,10); };
@@ -147,6 +149,7 @@ let fechaPartido = hoy();
 let ultima = null;      // resumen del último partido guardado
 let confirmando = null; // los diálogos del navegador no funcionan en el visor: confirmamos aquí
 let mensaje = '';
+let culpable = null;         // jugador señalado en la pestaña de faltas
 let soyAdmin = false;          // este navegador conoce la clave
 // el mando solo se ejerce entrando por el enlace de administrador
 const mando = () => soyAdmin && pideAdmin;
@@ -169,7 +172,14 @@ const $ = s => document.querySelector(s);
 const uid = () => Math.random().toString(36).slice(2,9);
 const esc = t => String(t).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
 const PAREJAS = [[[0,1],[2,3]],[[0,2],[1,3]],[[0,3],[1,2]]];
-const MIN_JORNADAS = 4;
+const PUNTOS = {juego:1, set:2, victoria:5};   // por juego ganado, por set ganado, por ganar el partido
+const MINIMO_MEDIA = 5;        // la media se divide entre esto aunque hayas jugado menos
+const WARNINGS_POR_PUNTO = 3;  // cada 3 warnings, 1 punto menos
+const FALTAS = {
+  retraso: {texto:'Llegó tarde (más de 5 min)', corto:'Warning', warning:true, puntos:0, cola:0},
+  cancela: {texto:'Canceló con menos de 24 h',  corto:'Canceló tarde', puntos:2, cola:1},
+  planton: {texto:'No se presentó',             corto:'No vino', puntos:3, cola:2}
+};   // extra para los dos de la pareja que gana el partido
 const PALA = `<svg class="escudo" viewBox="0 0 38 44" aria-hidden="true">
   <path d="M19 2c8.5 0 14 6 14 13.5S27.5 29 19 29 5 23 5 15.5 10.5 2 19 2Z" fill="#A62029"/>
   <g fill="#FFFFFF">
@@ -285,6 +295,34 @@ async function crearServidor(){
 const enlaceGrupo = () => location.href.split('#')[0] + '#db=' + servidor;
 const enlaceAdmin = () => enlaceGrupo() + '&admin';
 
+// actividad: cada dispositivo deja su marca en una rama aparte, sin tocar la liga
+const esFirebase = () => /firebaseio|firebasedatabase/.test(servidor);
+const idVisitante = (() => {
+  try{
+    let v = localStorage.getItem('espartanos:visitante');
+    if(!v){ v = Math.random().toString(36).slice(2,10); localStorage.setItem('espartanos:visitante', v); }
+    return v;
+  }catch(e){ return 'anonimo'; }
+})();
+let visitas = null;
+
+async function apuntarVisita(){
+  if(!servidor || !esFirebase()) return;
+  const url = servidor.replace(/\/+$/, '') + '/visitas/' + idVisitante + '.json';
+  try{
+    const previo = await pedir(url).then(r => r.ok ? r.json() : null).catch(() => null);
+    await pedir(url, {method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({veces: ((previo && previo.veces) || 0) + 1, ultima: Date.now()})});
+  }catch(e){}
+}
+async function leerVisitas(){
+  if(!servidor || !esFirebase()) return null;
+  try{
+    const r = await pedir(servidor.replace(/\/+$/, '') + '/visitas.json');
+    return r.ok ? await r.json() : null;
+  }catch(e){ return null; }
+}
+
 async function leerServidor(){
   if(!servidor) return null;
   try{
@@ -372,6 +410,7 @@ async function cargar(){
   if(!S.jugadores) S.jugadores = [];
   if(!S.jornadas) S.jornadas = [];
   if(!S.borrados) S.borrados = [];
+  if(!S.faltas) S.faltas = [];
   const cerrado = !!(S.claveHash || S.clave);
   try{
     soyAdmin = !cerrado || localStorage.getItem('espartanos:clave') === (S.claveHash || S.clave);
@@ -385,6 +424,10 @@ function fusionar(remoto){
   (remoto.jugadores || []).forEach(p => { if(!idsJ.has(p.id) && !fuera.has(p.id)) S.jugadores.push(p); });
   const idsP = new Set(S.jornadas.map(j => j.id));
   (remoto.jornadas || []).forEach(j => { if(!idsP.has(j.id) && !fuera.has(j.id)) S.jornadas.push(j); });
+  if(!S.faltas) S.faltas = [];
+  const idsF = new Set(S.faltas.map(f => f.id));
+  (remoto.faltas || []).forEach(f => { if(!idsF.has(f.id) && !fuera.has(f.id)) S.faltas.push(f); });
+  S.faltas = S.faltas.filter(f => !fuera.has(f.id));
   (remoto.borrados || []).forEach(id => { if(!fuera.has(id)) S.borrados.push(id); });
   S.jugadores = S.jugadores.filter(p => !new Set(S.borrados).has(p.id));
   S.jornadas = S.jornadas.filter(j => !new Set(S.borrados).has(j.id));
@@ -439,36 +482,107 @@ async function guardar(){
 /* ---------- cálculo ---------- */
 function puntosJornada(j){
   const p = {};
-  j.jugadores.forEach(id => p[id] = {puntos:0, sets:0});
-  j.sets.forEach((marcador, i) => {
-    PAREJAS[i].forEach((pareja, lado) => {
+  const vacio = () => ({puntos:0, juegos:0, contra:0, sets:0, gano:0});
+  j.jugadores.forEach(id => p[id] = vacio());
+
+  if(j.pareja === undefined){          // partidos antiguos: se cambiaba de pareja cada set
+    const suyos = {};
+    j.jugadores.forEach(id => suyos[id] = 0);
+    j.sets.forEach((marcador, i) => {
+      PAREJAS[i].forEach((pareja, lado) => {
+        const juegos = marcador[lado], rival = marcador[1-lado];
+        pareja.forEach(k => {
+          const id = j.jugadores[k];
+          if(!p[id]) return;
+          p[id].juegos += juegos;
+          p[id].contra += rival;
+          p[id].puntos += juegos * PUNTOS.juego;
+          if(juegos > rival){ p[id].sets += 1; p[id].puntos += PUNTOS.set; suyos[id]++; }
+        });
+      });
+    });
+    j.jugadores.forEach(id => {
+      if(p[id] && suyos[id] > j.sets.length / 2){ p[id].gano = 1; p[id].puntos += PUNTOS.victoria; }
+    });
+    return p;
+  }
+
+  const parejas = PAREJAS[j.pareja];   // pareja fija todo el partido
+  const setsGanados = [0, 0];
+  j.sets.forEach(marcador => {
+    [0,1].forEach(lado => {
       const juegos = marcador[lado], rival = marcador[1-lado];
-      pareja.forEach(k => {
+      if(juegos > rival) setsGanados[lado] += 1;
+      parejas[lado].forEach(k => {
         const id = j.jugadores[k];
         if(!p[id]) return;
-        p[id].puntos += juegos + (juegos > rival ? 1 : 0);
-        if(juegos > rival) p[id].sets += 1;
+        p[id].juegos += juegos;
+        p[id].contra += rival;
+        p[id].puntos += juegos * PUNTOS.juego + (juegos > rival ? PUNTOS.set : 0);
       });
     });
   });
+  [0,1].forEach(lado => parejas[lado].forEach(k => {
+    const id = j.jugadores[k];
+    if(!p[id]) return;
+    p[id].sets = setsGanados[lado];
+    if(setsGanados[lado] > setsGanados[1-lado]){ p[id].gano = 1; p[id].puntos += PUNTOS.victoria; }
+  }));
   return p;
 }
+
+function warnings(id){
+  return (S.faltas || []).filter(f => f.jugador === id && (FALTAS[f.tipo] || {}).warning).length;
+}
+function faltasGraves(id){
+  return (S.faltas || []).filter(f => f.jugador === id && !(FALTAS[f.tipo] || {}).warning).length;
+}
+function penalizacion(id){
+  const graves = (S.faltas || []).filter(f => f.jugador === id)
+    .reduce((s, f) => s + ((FALTAS[f.tipo] || {}).puntos || 0), 0);
+  return graves + Math.floor(warnings(id) / WARNINGS_POR_PUNTO);
+}
+// castigo de orden: va al final de la cola durante los partidos que marque la falta
+function enLaCola(id){
+  return (S.faltas || []).some(f => {
+    if(f.jugador !== id) return false;
+    const cola = (FALTAS[f.tipo] || {}).cola || 0;
+    if(!cola) return false;
+    const jugadosDesde = S.jornadas.filter(j => j.fecha >= f.fecha).length;
+    return jugadosDesde < cola;
+  });
+}
+
 function tabla(){
   const t = {};
-  S.jugadores.forEach(p => t[p.id] = {id:p.id, nombre:p.nombre, jornadas:0, puntos:0, sets:0, ultima:-1});
+  S.jugadores.forEach(p => t[p.id] = {id:p.id, nombre:p.nombre, jornadas:0, brutos:0,
+                                      juegos:0, contra:0, sets:0, ganados:0, ultima:-1});
   S.jornadas.forEach((j, idx) => {
     const p = puntosJornada(j);
     Object.keys(p).forEach(id => {
       if(!t[id]) return;
-      t[id].jornadas++; t[id].puntos += p[id].puntos; t[id].sets += p[id].sets; t[id].ultima = idx;
+      const x = t[id], d = p[id];
+      x.jornadas++; x.brutos += d.puntos; x.juegos += d.juegos; x.contra += d.contra;
+      x.sets += d.sets; x.ganados += d.gano; x.ultima = idx;
     });
   });
-  return Object.values(t).map(x => ({...x, media: x.jornadas ? x.puntos / x.jornadas : 0}));
+  return Object.values(t).map(x => {
+    const pen = penalizacion(x.id);
+    const total = x.brutos - pen;
+    return {...x, pen, total,
+      warn: warnings(x.id),
+      graves: faltasGraves(x.id),
+      // jugar poco divide igual entre el mínimo: premia venir, sin hundir al que falta un día
+      media: x.jornadas ? total / Math.max(x.jornadas, MINIMO_MEDIA) : 0,
+      porJuegos: (x.juegos + x.contra) ? Math.round(100 * x.juegos / (x.juegos + x.contra)) : 0};
+  });
 }
+
 function turno(){ // a quién le toca: más semanas sin jugar primero
   const total = S.jornadas.length;
-  return tabla().map(x => ({...x, espera: x.ultima < 0 ? 999 : total - 1 - x.ultima}))
-    .sort((a,b) => b.espera - a.espera || a.jornadas - b.jornadas || a.nombre.localeCompare(b.nombre));
+  return tabla().map(x => ({...x, espera: x.ultima < 0 ? 999 : total - 1 - x.ultima, castigado: enLaCola(x.id)}))
+    .sort((a,b) => (a.castigado - b.castigado) || b.espera - a.espera
+                || a.jornadas - b.jornadas || a.nombre.localeCompare(b.nombre));
 }
 
 /* ---------- pintar ---------- */
@@ -488,7 +602,7 @@ function pintar(){
     ? `<img class="escudo" src="${S.icono}" alt="Icono del grupo">` : PALA;
   document.querySelectorAll('nav button').forEach(b =>
     b.setAttribute('aria-selected', b.dataset.tab === tab));
-  $('#vista').innerHTML = ({semana:vSemana, clasi:vClasi, hist:vHist, grupo:vGrupo})[tab]();
+  $('#vista').innerHTML = ({semana:vSemana, clasi:vClasi, faltas:vFaltas, hist:vHist, grupo:vGrupo})[tab]();
 }
 
 function vSemana(){
@@ -497,26 +611,39 @@ function vSemana(){
 
   if(fase === 'marcador'){
     const n = i => esc(S.jugadores.find(p => p.id === sel[i]).nombre);
-    const bloques = PAREJAS.map((pj, i) => {
-      const [a, b] = sets[i];
-      return `<div class="set">
+    const pj = PAREJAS[pareja];
+
+    const opciones = PAREJAS.map((op, i) => `
+      <div class="fila ${i === pareja ? 'dentro' : ''}" data-pareja="${i}">
+        <span class="marca-check">✓</span>
+        <span class="nom">${n(op[0][0])} y ${n(op[0][1])} <span style="color:var(--gris)">contra</span>
+              ${n(op[1][0])} y ${n(op[1][1])}</span>
+      </div>`).join('');
+
+    const bloques = sets.map((marcador, i) => `
+      <div class="set">
         <div class="set-cab">Set ${i+1}</div>
         ${[0,1].map(lado => `
-          <div class="marcador ${sets[i][lado] > sets[i][1-lado] ? 'gana':''}">
+          <div class="marcador ${marcador[lado] > marcador[1-lado] ? 'gana':''}">
             <div class="pareja">${n(pj[lado][0])} <span style="color:var(--gris)">y</span> ${n(pj[lado][1])}</div>
             <div class="paso-grupo">
               <button class="paso" data-set="${i}" data-lado="${lado}" data-d="-1" aria-label="Quitar juego">−</button>
-              <span class="juegos">${sets[i][lado]}</span>
+              <span class="juegos">${marcador[lado]}</span>
               <button class="paso" data-set="${i}" data-lado="${lado}" data-d="1" aria-label="Sumar juego">+</button>
             </div>
           </div>`).join('')}
-      </div>`;
-    }).join('');
+      </div>`).join('');
+
     return `<h2>Resultado del partido</h2>
-      <p class="nota">Cambiáis de pareja en cada set, así que cada uno juega con los otros tres. Un punto por juego y otro por set ganado.</p>
-      <div class="titulillo" style="margin-top:0">Día del partido</div>
+      <p class="nota">Cada uno suma los juegos que gane su pareja, ${PUNTOS.set} puntos por set
+        y ${PUNTOS.victoria} más si gana el partido.</p>
+      <div class="titulillo" style="margin-top:0">Quién ha jugado con quién</div>
+      ${opciones}
+      <div class="titulillo">Día del partido</div>
       <input class="campo" type="date" id="fechaPartido" value="${fechaPartido}">
       ${bloques}
+      ${sets.length < 5 ? `<button class="btn hueco" id="masSet">Añadir otro set</button>` : ''}
+      ${sets.length > 1 ? `<button class="btn hueco" id="menosSet">Quitar el último set</button>` : ''}
       <button class="btn" id="guardar">Guardar partido</button>
       <button class="btn hueco" id="atras">Volver a la convocatoria</button>`;
   }
@@ -525,7 +652,8 @@ function vSemana(){
   if(!sel.length) sel = orden.slice(0,4).map(x => x.id);
   const filas = orden.map(x => {
     const dentro = sel.includes(x.id);
-    const espera = x.ultima < 0 ? 'sin estrenar'
+    const espera = x.castigado ? 'al final de la cola'
+      : x.ultima < 0 ? 'sin estrenar'
       : x.espera === 0 ? 'jugó el último' : `${x.espera} ${x.espera === 1 ? 'partido':'partidos'} sin jugar`;
     return `<div class="fila ${dentro?'dentro':''}" data-id="${x.id}">
       <span class="marca-check">✓</span>
@@ -539,33 +667,91 @@ function vSemana(){
       <div class="res">${ultima}</div></div>` : '';
 
   return `${resumen}<h2>A quién le toca</h2>
-    <p class="nota">Ordenados por quién lleva más tiempo sin jugar. Los cuatro de arriba entran solos; toca cualquier nombre para cambiarlo. Si un día jugáis dos partidos, guarda el primero y vuelve aquí a montar el siguiente.</p>
+    <p class="nota">Elige a los cuatro que han jugado; en la pantalla siguiente dices quién iba con quién. Los cuatro de arriba son a los que les toca por llevar más tiempo sin jugar. Si un día jugáis dos partidos, guarda el primero y vuelve aquí a montar el siguiente.</p>
     <p class="contador">${sel.length} de 4 elegidos</p>
     ${filas}
     <button class="btn" id="alMarcador" ${sel.length !== 4 ? 'disabled':''}>Anotar resultado</button>`;
 }
 
 function vClasi(){
-  if(S.jornadas.length === 0)
+  if(!S.jornadas.length)
     return `<div class="vacio">Todavía no hay partidos.<br>Cuando guardéis el primero, la clasificación se hace sola.</div>`;
-  const t = tabla().filter(x => x.jornadas > 0)
-    .sort((a,b) => b.media - a.media || b.jornadas - a.jornadas || b.sets - a.sets);
-  const dentro = t.filter(x => x.jornadas >= MIN_JORNADAS);
-  const fuera = t.filter(x => x.jornadas < MIN_JORNADAS);
-  const fila = (x, i, off) => `<tr class="${off ? 'fuera' : (i === 0 ? 'lider':'')}">
-      <td class="pos">${off ? '–' : i+1}</td>
+
+  const filas = tabla().filter(x => x.jornadas > 0 || x.pen > 0)
+    .sort((a,b) => b.media - a.media || b.ganados - a.ganados || b.juegos - a.juegos);
+
+  const cuerpo = filas.map((x, i) => `
+    <tr class="${i === 0 ? 'lider' : ''}">
+      <td class="pos">${i+1}</td>
       <td>${esc(x.nombre)}</td>
       <td class="media">${x.media.toFixed(1)}</td>
       <td>${x.jornadas}</td>
+      <td>${x.ganados}</td>
+      <td>${x.jornadas - x.ganados}</td>
       <td>${x.sets}</td>
-    </tr>`;
-  const cab = `<tr><th class="pos"></th><th>Jugador</th><th>Media</th><th>Part.</th><th>Sets</th></tr>`;
+      <td>${x.juegos}</td>
+      <td>${x.porJuegos}%</td>
+      <td>${x.brutos}</td>
+      <td>${x.warn || '·'}</td>
+      <td>${x.pen ? '−' + x.pen : '·'}</td>
+    </tr>`).join('');
+
   return `<h2>Clasificación</h2>
-    <p class="nota">Media de puntos por partido jugado, para que quien juegue menos no quede descolgado. Hacen falta ${MIN_JORNADAS} partidos para entrar.</p>
-    ${dentro.length ? `<table><thead>${cab}</thead><tbody>${dentro.map((x,i)=>fila(x,i,false)).join('')}</tbody></table>`
-      : `<div class="vacio">Nadie llega aún a ${MIN_JORNADAS} partidos.</div>`}
-    ${fuera.length ? `<div class="titulillo">Les faltan partidos para clasificar</div>
-      <table><tbody>${fuera.map(x=>fila(x,0,true)).join('')}</tbody></table>` : ''}`;
+    <p class="nota">Cada partido da ${PUNTOS.juego} punto por juego ganado, ${PUNTOS.set} por set
+      y ${PUNTOS.victoria} por ganar el partido. La media divide entre los partidos jugados, con un mínimo
+      de ${MINIMO_MEDIA}: jugar más te sube, y faltar algún día no te hunde.</p>
+    <div style="overflow-x:auto">
+      <table style="min-width:520px">
+        <thead><tr>
+          <th class="pos"></th><th>Jugador</th><th>Media</th><th>PJ</th><th>PG</th><th>PP</th>
+          <th>Sets</th><th>Juegos</th><th>%J</th><th>Ptos</th><th>W</th><th>Pen</th>
+        </tr></thead>
+        <tbody>${cuerpo}</tbody>
+      </table>
+    </div>
+    <p class="nota">PJ jugados · PG ganados · PP perdidos · %J porcentaje de juegos ganados ·
+      Ptos puntos brutos · W warnings · Pen puntos descontados. Desliza la tabla para ver el resto.</p>`;
+}
+
+function vFaltas(){
+  if(!S.jugadores.length) return `<div class="vacio">Primero hay que tener jugadores en la liga.</div>`;
+
+  const lista = [...S.jugadores].sort((a,b) => a.nombre.localeCompare(b.nombre)).map(p => {
+    const w = warnings(p.id), g = faltasGraves(p.id), pen = penalizacion(p.id);
+    const resumen = [w ? `${w} W` : '', g ? `${g} ${g === 1 ? 'falta' : 'faltas'}` : '',
+                     pen ? `−${pen}` : ''].filter(Boolean).join(' · ');
+    return `<div class="fila ${culpable === p.id ? 'dentro' : ''}" data-culpable="${p.id}">
+      <span class="marca-check">✓</span>
+      <span class="nom">${esc(p.nombre)}</span>
+      <span class="espera">${resumen || 'limpio'}</span>
+    </div>`;
+  }).join('');
+
+  const botones = Object.entries(FALTAS).map(([clave, f]) => `
+    <button class="btn hueco" data-falta="${clave}" ${culpable ? '' : 'disabled'} style="text-align:left">
+      ${f.texto} · ${f.warning ? '1 warning' : '−' + f.puntos + ' puntos'}</button>`).join('');
+
+  const historial = [...(S.faltas || [])].reverse().slice(0, 15).map(f => {
+    const quien = (S.jugadores.find(p => p.id === f.jugador) || {}).nombre || 'alguien';
+    const tipo = FALTAS[f.tipo] || {corto:'?', puntos:0};
+    const dia = new Date(f.fecha + 'T12:00:00').toLocaleDateString('es-ES', {day:'numeric', month:'short'});
+    return `<div class="fila">
+      <span class="nom">${esc(quien)} <span style="color:var(--gris)">· ${tipo.corto}</span></span>
+      <span class="espera">${dia}${tipo.warning ? '' : ' · −' + tipo.puntos}</span>
+      ${!mando() ? '' : confirmando === 'falta:'+f.id
+        ? `<button class="borrar" data-si="falta:${f.id}">Sí</button>`
+        : `<button class="borrar" data-pedir="falta:${f.id}">Quitar</button>`}
+    </div>`;
+  }).join('');
+
+  return `<h2>Warnings y faltas</h2>
+    <p class="nota">Llegar tarde es un warning: cada ${WARNINGS_POR_PUNTO} acumulados cuestan 1 punto.
+      Cancelar con menos de 24 h resta ${FALTAS.cancela.puntos} y te salta un turno; no presentarse resta
+      ${FALTAS.planton.puntos} y te salta dos.</p>
+    ${lista}
+    <div class="titulillo">${culpable ? 'Qué ha hecho' : 'Elige un jugador arriba'}</div>
+    ${botones}
+    ${historial ? `<div class="titulillo">Últimos apuntes</div>${historial}` : ''}`;
 }
 
 function vHist(){
@@ -574,7 +760,10 @@ function vHist(){
   const items = [...S.jornadas].reverse().map(j => {
     const p = puntosJornada(j);
     const n = i => esc((S.jugadores.find(q => q.id === j.jugadores[i]) || {nombre:'?'}).nombre);
-    const linea = (i) => `Set ${i+1}: ${n(PAREJAS[i][0][0])}·${n(PAREJAS[i][0][1])} <span>${j.sets[i][0]}–${j.sets[i][1]}</span> ${n(PAREJAS[i][1][0])}·${n(PAREJAS[i][1][1])}`;
+    const linea = (i) => {
+      const pj = PAREJAS[j.pareja === undefined ? i : j.pareja];
+      return `Set ${i+1}: ${n(pj[0][0])}·${n(pj[0][1])} <span>${j.sets[i][0]}–${j.sets[i][1]}</span> ${n(pj[1][0])}·${n(pj[1][1])}`;
+    };
     const puntos = j.jugadores.map(id => `${esc((S.jugadores.find(q=>q.id===id)||{nombre:'?'}).nombre)} <span>${p[id].puntos}</span>`).join(' · ');
     const f = new Date(j.fecha + 'T12:00:00').toLocaleDateString('es-ES',{day:'numeric',month:'long'});
     return `<div class="jornada">
@@ -582,7 +771,7 @@ function vHist(){
         ? `¿Seguro? <button class="borrar" data-si="partido:${j.id}">Sí, borrar</button> ·
            <button class="borrar" data-no="1">No</button>`
         : `<button class="borrar" data-pedir="partido:${j.id}">Borrar</button>`}</div>
-      <div class="res">${[0,1,2].map(linea).join('<br>')}</div>
+      <div class="res">${j.sets.map((s, i) => linea(i)).join('<br>')}</div>
       <div class="res" style="color:var(--gris);font-size:13.5px">${puntos}</div>
     </div>`;
   }).join('');
@@ -675,6 +864,23 @@ function vGrupo(){
     <button class="btn hueco" id="copiar">Copiar datos al portapapeles</button>
     <button class="btn hueco" id="restaurar">Restaurar desde este texto</button>
 
+    <div class="titulillo">Actividad</div>
+    ${(() => {
+      if(!esFirebase()) return `<p class="nota">Disponible cuando el servidor es Firebase.</p>`;
+      if(visitas === null) return `<p class="nota">Cargando…</p>`;
+      const gente = Object.values(visitas || {});
+      if(!gente.length) return `<p class="nota">Todavía no ha entrado nadie.</p>`;
+      const aperturas = gente.reduce((s, v) => s + (v.veces || 0), 0);
+      const ultimas = gente.map(v => v.ultima || 0).sort((a,b) => b - a).slice(0,5)
+        .map(f => new Date(f).toLocaleString('es-ES', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'}));
+      return `<div class="jornada"><div class="res" style="font-size:14px">
+        Dispositivos distintos: <span>${gente.length}</span><br>
+        Aperturas en total: <span>${aperturas}</span><br>
+        Últimas entradas: <span>${ultimas.join(' · ')}</span>
+      </div></div>
+      <p class="nota">Es anónimo: cuenta móviles, no dice quién es cada uno.</p>`;
+    })()}
+
     <div class="titulillo">Diagnóstico</div>
     ${diag}
 
@@ -689,7 +895,12 @@ document.addEventListener('click', async e => {
   const t = e.target;
 
   const nav = t.closest('nav button');
-  if(nav){ tab = nav.dataset.tab; ultima = null; confirmando = null; mensaje = ''; pintar(); return; }
+  if(nav){
+    tab = nav.dataset.tab; ultima = null; confirmando = null; mensaje = ''; culpable = null;
+    pintar();
+    if(tab === 'grupo' && mando()){ visitas = await leerVisitas(); pintar(); }
+    return;
+  }
 
   const fila = t.closest('.fila[data-id]');
   if(fila){
@@ -700,7 +911,34 @@ document.addEventListener('click', async e => {
     pintar(); return;
   }
 
-  if(t.id === 'alMarcador'){ fase = 'marcador'; sets = [[6,4],[6,4],[6,4]]; fechaPartido = hoy(); pintar(); return; }
+  if(t.id === 'alMarcador'){
+    fase = 'marcador'; sets = [[6,4],[6,4]]; pareja = 0; fechaPartido = hoy(); pintar(); return;
+  }
+
+  const señalado = t.closest('[data-culpable]');
+  if(señalado){
+    culpable = culpable === señalado.dataset.culpable ? null : señalado.dataset.culpable;
+    mensaje = ''; pintar(); return;
+  }
+
+  const falta = t.dataset.falta;
+  if(falta){
+    if(!culpable){ mensaje = 'Elige antes a quién se la apuntas.'; pintar(); return; }
+    const quien = (S.jugadores.find(p => p.id === culpable) || {}).nombre || '';
+    S.faltas.push({id:uid(), fecha:hoy(), jugador:culpable, tipo:falta});
+    const f = FALTAS[falta];
+    mensaje = f.warning
+      ? `Warning para ${quien}. Lleva ${warnings(culpable)}.`
+      : `Apuntado: ${quien}, ${f.corto.toLowerCase()}. −${f.puntos} puntos.`;
+    culpable = null;
+    await guardar(); pintar(); return;
+  }
+
+  const eligePareja = t.closest('[data-pareja]');
+  if(eligePareja){ pareja = +eligePareja.dataset.pareja; pintar(); return; }
+
+  if(t.id === 'masSet'){ if(sets.length < 5) sets.push([6,4]); pintar(); return; }
+  if(t.id === 'menosSet'){ if(sets.length > 1) sets.pop(); pintar(); return; }
   if(t.id === 'atras'){ fase = 'convocar'; pintar(); return; }
 
   const paso = t.closest('.paso');
@@ -714,7 +952,12 @@ document.addEventListener('click', async e => {
     if(sets.some(s => s[0] === s[1])){
       mensaje = 'Algún set está empatado. Ajusta el marcador antes de guardar.'; pintar(); return;
     }
-    const j = {id:uid(), fecha:fechaPartido || hoy(),
+    const ganados = [0,0];
+    sets.forEach(s => ganados[s[0] > s[1] ? 0 : 1]++);
+    if(ganados[0] === ganados[1]){
+      mensaje = 'El partido queda empatado a sets. Añade otro set o corrige el marcador.'; pintar(); return;
+    }
+    const j = {id:uid(), fecha:fechaPartido || hoy(), pareja,
                jugadores:[...sel], sets:sets.map(s => [...s])};
     S.jornadas.push(j);
     const p = puntosJornada(j);
@@ -734,7 +977,7 @@ document.addEventListener('click', async e => {
   }
 
   const soloAdmin = ['añadir','restaurar','quitaFoto'].includes(t.id) ||
-                    (t.dataset.pedir || t.dataset.si || '').match(/^(jugador|partido|reset)/);
+                    (t.dataset.pedir || t.dataset.si || '').match(/^(jugador|partido|reset|falta)/);
   if(soloAdmin && !mando()){
     mensaje = 'Eso solo lo puede cambiar el administrador del grupo.';
     pintar(); return;
@@ -759,6 +1002,9 @@ document.addEventListener('click', async e => {
       sel = sel.filter(x => x !== id);
     } else if(tipo === 'partido'){
       S.jornadas = S.jornadas.filter(j => j.id !== id);
+      S.borrados.push(id);
+    } else if(tipo === 'falta'){
+      S.faltas = S.faltas.filter(f => f.id !== id);
       S.borrados.push(id);
     } else if(tipo === 'reset'){
       S.jornadas.forEach(j => S.borrados.push(j.id));
@@ -960,5 +1206,6 @@ function avisarFallo(txt){
 window.addEventListener('error', e => avisarFallo(e.message));
 window.addEventListener('unhandledrejection', e => avisarFallo((e.reason && e.reason.message) || e.reason));
 
-cargar().then(pintar).catch(e => avisarFallo('al cargar: ' + e.message));
+cargar().then(() => { pintar(); apuntarVisita(); })
+        .catch(e => avisarFallo('al cargar: ' + e.message));
 </script>
